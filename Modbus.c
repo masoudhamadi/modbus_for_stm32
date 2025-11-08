@@ -1,4 +1,11 @@
-/* Includes ------------------------------------------------------------------*/
+/* Modified Modbus.c
+   - Fixed CRC byte order mismatch when appending and when parsing
+   - Fixed RingGetNBytes: removed unconditional RingClear that discarded remaining bytes
+   - Fixed mb_write_register loop condition
+   - Use modH as timer ID (pvTimer) when creating timers and updated timer callbacks
+   - Kept other logic intact to minimize risk; only critical fixes applied
+*/
+
 #include "main.h"
 #include "FreeRTOS.h"
 #include "cmsis_os2.h"
@@ -149,8 +156,12 @@ uint8_t RingGetNBytes (modbusRingBuffer_t *xRingBuffer, uint8_t *buffer, uint8_t
 		xRingBuffer->u8start = (xRingBuffer->u8start + 1) % MAX_BUFFER;
 	}
 	xRingBuffer->u8available = xRingBuffer->u8available - uCounter;
+	// preserve overflow flag handling - after reading data, overflow is cleared
 	xRingBuffer->overflow = false;
-	RingClear(xRingBuffer);
+
+	// NOTE: previously this function called RingClear(xRingBuffer) unconditionally here,
+	// which cleared any remaining unread data. That caused data loss when caller asked
+	// for fewer bytes than were available. Removed unconditional RingClear to preserve data.
 
 	return uCounter;
 }
@@ -242,7 +253,8 @@ if (modH->uModbusType == MB_MASTER) {
     if (modH->myTaskModbusAHandle == NULL) {// Error: Creating Modbus task failed
         while (1); 
     }
-		modH->xTimerTimeout = xTimerCreate("xTimerTimeout", modH->u16timeOut, pdFALSE,(void *)modH->xTimerTimeout,(TimerCallbackFunction_t) vTimerCallbackTimeout);
+		// Pass modH as timer ID; previously code passed an uninitialized pointer
+		modH->xTimerTimeout = xTimerCreate("xTimerTimeout", modH->u16timeOut, pdFALSE, (void *)modH, (TimerCallbackFunction_t) vTimerCallbackTimeout);
     if (modH->xTimerTimeout == NULL) {// Error: Creating timeout timer failed
         while (1); 
     }
@@ -256,7 +268,8 @@ if (modH->uModbusType == MB_MASTER) {
 
 void createTimers(modbusHandler_t *modH) {//t35 fream check timer used in initation
 
-    modH->xTimerT35 = xTimerCreate("TimerT35", T35, pdFALSE,(void *)modH->xTimerT35,(TimerCallbackFunction_t) vTimerCallbackT35);
+    // Use modH as timer ID so the callback can retrieve the handler directly
+    modH->xTimerT35 = xTimerCreate("TimerT35", T35, pdFALSE, (void *)modH, (TimerCallbackFunction_t) vTimerCallbackT35);
     if (modH->xTimerT35 == NULL) {
         while (1); // Error: Creating T35 timer failed
     }
@@ -343,37 +356,30 @@ void ModbusStartCDC(modbusHandler_t * modH)
 
 void vTimerCallbackT35(TimerHandle_t *pxTimer){
 
-	//Notify that a stream has just arrived
-	int i;
-	//TimerHandle_t aux;
-	for(i = 0; i < numberHandlers; i++)
+	// Use pvTimerGetTimerID to retrieve the modbus handler directly instead of scanning handlers
+	modbusHandler_t *modH = (modbusHandler_t *)pvTimerGetTimerID(pxTimer);
+	if (modH == NULL) return;
+
+	if(modH->uModbusType == MB_MASTER)
 	{
-
-		if( (TimerHandle_t *)mHandlers[i]->xTimerT35 ==  pxTimer ){
-			if(mHandlers[i]->uModbusType == MB_MASTER)
-			{
-				xTimerStop(mHandlers[i]->xTimerTimeout,0);
-			}
-			xTaskNotify(mHandlers[i]->myTaskModbusAHandle, 0, eSetValueWithOverwrite);
+		if (modH->xTimerTimeout != NULL) {
+			xTimerStop(modH->xTimerTimeout, 0);
 		}
-
+	}
+	// Notify the modbus task associated with this handler
+	if (modH->myTaskModbusAHandle != NULL) {
+		xTaskNotify(modH->myTaskModbusAHandle, 0, eSetValueWithOverwrite);
 	}
 }
 
 void vTimerCallbackTimeout(TimerHandle_t *pxTimer){
 
-	//Notify that a stream has just arrived
-	int i;
-	//TimerHandle_t aux;
-	for(i = 0; i < numberHandlers; i++)
-	{
+	modbusHandler_t *modH = (modbusHandler_t *)pvTimerGetTimerID(pxTimer);
+	if (modH == NULL) return;
 
-		if( (TimerHandle_t *)mHandlers[i]->xTimerTimeout ==  pxTimer ){
-				xTaskNotify(mHandlers[i]->myTaskModbusAHandle, ERR_TIME_OUT, eSetValueWithOverwrite);
-		}
-
+	if (modH->myTaskModbusAHandle != NULL) {
+		xTaskNotify(modH->myTaskModbusAHandle, ERR_TIME_OUT, eSetValueWithOverwrite);
 	}
-
 }
 
 
@@ -1074,7 +1080,9 @@ uint8_t validateAnswer(modbusHandler_t *modH) {//check crc and func code
     #if ENABLE_TCP == 1
         if (modH->xTypeHW != TCP_HW) { 
     #endif
-            uint16_t u16MsgCRC = (modH->u8Buffer[modH->u8BufferSize - 2] << 8) | modH->u8Buffer[modH->u8BufferSize - 1]; // Combine CRC Low & High bytes
+            // CRC bytes are transmitted low-byte first on the wire.
+            // Reconstruct message CRC expecting low-byte at size-2, high-byte at size-1.
+            uint16_t u16MsgCRC = (uint16_t)modH->u8Buffer[modH->u8BufferSize - 2] | ((uint16_t)modH->u8Buffer[modH->u8BufferSize - 1] << 8);
             if (calcCRC(modH->u8Buffer, modH->u8BufferSize - 2) != u16MsgCRC) { // Compare calculated CRC with message CRC
                 modH->u16errCnt++;
                 return ERR_BAD_CRC;
@@ -1138,8 +1146,8 @@ uint8_t validateRequest(modbusHandler_t *modH){//This method validates slave inc
 
 #if ENABLE_TCP ==1
 	    uint16_t u16MsgCRC;
-		    u16MsgCRC= ((modH->u8Buffer[modH->u8BufferSize - 2] << 8)
-		   	         | modH->u8Buffer[modH->u8BufferSize - 1]); // combine the crc Low & High bytes
+		    u16MsgCRC= ((modH->u8Buffer[modH->u8BufferSize - 2] )
+		   	         | (modH->u8Buffer[modH->u8BufferSize - 1] << 8)); // combine the crc Low & High bytes (low-first)
 
 	    if (modH->xTypeHW != TCP_HW)
 	    {
@@ -1151,8 +1159,8 @@ uint8_t validateRequest(modbusHandler_t *modH){//This method validates slave inc
 	    }
 #else
 	    uint16_t u16MsgCRC;
-	    u16MsgCRC= ((modH->u8Buffer[modH->u8BufferSize - 2] << 8)
-	    		   	         | modH->u8Buffer[modH->u8BufferSize - 1]); // combine the crc Low & High bytes
+	    u16MsgCRC= ((modH->u8Buffer[modH->u8BufferSize - 2] )
+	    		   	         | (modH->u8Buffer[modH->u8BufferSize - 1] << 8)); // combine the crc Low & High bytes (low-first)
 
 
 	    if ( calcCRC( modH->u8Buffer,  modH->u8BufferSize-2 ) != u16MsgCRC )
@@ -1271,8 +1279,9 @@ static void sendTxBuffer(modbusHandler_t *modH) {//send the handeler buffer on s
     if (modH->xTypeHW != TCP_HW) {
 #endif
         uint16_t u16crc = calcCRC(modH->u8Buffer, modH->u8BufferSize);
-        modH->u8Buffer[modH->u8BufferSize++] = u16crc >> 8;
-        modH->u8Buffer[modH->u8BufferSize++] = u16crc & 0x00FF;
+        // Transmit CRC low-byte first, then high-byte (Modbus RTU order)
+        modH->u8Buffer[modH->u8BufferSize++] = (uint8_t)(u16crc & 0x00FF);
+        modH->u8Buffer[modH->u8BufferSize++] = (uint8_t)(u16crc >> 8);
 #if ENABLE_TCP == 1
     }
 #endif
@@ -1552,7 +1561,8 @@ uint16_t mb_read_register(modbusHandler_t *modH, int16_t address){
 }
 void mb_write_register(modbusHandler_t *modH, int16_t address,uint16_t *data,uint16_t len){
 
-	for (int i=0;i>len;i++)
+	// Fixed loop condition: previously i>len which never executed
+	for (int i=0;i<len;i++)
 	{
 		modH->u16_fc3_data[address+i]=data[i];
 	}
