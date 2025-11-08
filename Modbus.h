@@ -231,6 +231,7 @@ extern modbusHandler_t *mHandlers[MAX_M_HANDLERS];
 // Function prototypes
 void ModbusInit(modbusHandler_t * modH);
 void ModbusStart(modbusHandler_t * modH);
+void modbustask_init(void);
 
 #if ENABLE_USB_CDC == 1
 void ModbusStartCDC(modbusHandler_t * modH);

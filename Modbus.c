@@ -10,6 +10,16 @@
 /* Private typedef -----------------------------------------------------------*/
 modbusHandler_t Modbus_1;
 modbusHandler_t *mHandlers[MAX_M_HANDLERS];
+
+/* Definitions for modbus */
+osThreadId_t				modbusTaskHandle;
+const osThreadAttr_t		modbusTask_attributes =
+{
+	.name = "modbus",
+	.stack_size = 128 * 4,
+	.priority = (osPriority_t) osPriorityNormal,
+};
+
 /* Private define ------------------------------------------------------------*/
 #if ENABLE_TCP == 1
 #include "api.h"
@@ -67,6 +77,7 @@ const osSemaphoreAttr_t ModBusSphr_attributes = {//Semaphore to access the Modbu
 };
 
 /* Private function prototypes -----------------------------------------------*/
+void modbusTask ( void *argument);
 static void createModbusSlaveTask(modbusHandler_t *modH);
 static void createModbusMasterTask(modbusHandler_t *modH);
 static void createTimers(modbusHandler_t *modH);
@@ -1551,7 +1562,6 @@ void modbus_configuration (void){
   uint16_t modbus_f1_data[10];
 	uint16_t modbus_f3_data[10];
 	uint16_t ModbusDATA[64];
-	system_component_init();
 	Modbus_1.uModbusType = MB_SLAVE;
   Modbus_1.port =  &huart4;
   Modbus_1.u8id = 17; //Modbus slave ID
@@ -1563,4 +1573,25 @@ void modbus_configuration (void){
 	Modbus_1.u16_fc3_data = modbus_f3_data;
   Modbus_1.u16regsize= sizeof(ModbusDATA)/sizeof(ModbusDATA[0]);
   Modbus_1.xTypeHW = USART_HW;
+  
+    //Initialize Modbus library
+  ModbusInit(&Modbus_1);
+  //Start capturing traffic on serial Port
+  ModbusStart(&Modbus_1);
+  
+}
+
+void modbusTask ( void *argument){/* synce modbus data */	
+	debug_log(LOG_INFO, "modbus started" );
+	for (;;)
+	{
+
+		xSemaphoreTake ( Modbus_1.ModBusSphrHandle, 100 );
+		HAL_GPIO_WritePin ( GPIOB, GPIO_PIN_5, Modbus_1.u16regs[0] & 0x1 );
+		xSemaphoreGive ( Modbus_1.ModBusSphrHandle );
+		osDelay(10);
+	}
+}
+void modbustask_init(void){
+  modbusTaskHandle = osThreadNew ( modbusTask, NULL, &modbusTask_attributes );
 }
