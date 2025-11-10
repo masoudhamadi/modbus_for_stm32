@@ -21,7 +21,7 @@
 
 typedef enum
 {
-    USART_HW = 1,
+  USART_HW = 1,
 	USART_HW_DMA = 4,
 }mb_hardware_t ;
 
