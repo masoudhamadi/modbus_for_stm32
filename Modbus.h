@@ -1,12 +1,19 @@
-#ifndef __MODBUS_H_
-#define __MODBUS_H_
+/*
+ * Modbus.h
+ *
+ *  Created on: May 5, 2020
+ *      Author: Alejandro Mera
+ */
+
+#ifndef THIRD_PARTY_MODBUS_INC_MODBUS_H_
+#define THIRD_PARTY_MODBUS_INC_MODBUS_H_
 
 
 #include "ModbusConfig.h"
 #include <inttypes.h>
 #include <stdbool.h>
 #include "FreeRTOS.h"
-#include "cmsis_os2.h"
+#include "cmsis_os.h"
 #include "task.h"
 #include "queue.h"
 #include "timers.h"
@@ -15,8 +22,6 @@
 typedef enum
 {
     USART_HW = 1,
-    USB_CDC_HW = 2,
-    TCP_HW = 3,
 	USART_HW_DMA = 4,
 }mb_hardware_t ;
 
@@ -26,7 +31,6 @@ typedef enum
     MB_SLAVE = 3,
     MB_MASTER = 4
 }mb_masterslave_t ;
-
 
 
 /**
@@ -118,7 +122,20 @@ typedef union {
 } bytesFields ;
 
 
+/**
+ * @enum
+ * @brief
+ * Database/register list
+ *
+ */
 
+enum
+{
+	DB_COILS = 1,
+	DB_INPUT_COILS = 2,
+	DB_HOLDING_REGISTER = 3,
+	DB_INPUT_REGISTERS = 4
+};
 
 
 /**
@@ -137,24 +154,8 @@ typedef struct
     uint16_t u16CoilsNo;   /*!< Number of coils or registers to access */
     uint16_t *u16reg;     /*!< Pointer to memory image in master */
     uint32_t *u32CurrentTask; /*!< Pointer to the task that will receive notifications from Modbus */
-#if ENABLE_TCP ==1
-    uint32_t   xIpAddress;
-    uint16_t u16Port;
-    uint8_t  u8clientID;
-#endif
 }
 modbus_t;
-
-
-#if ENABLE_TCP == 1
-typedef struct
-{
-	struct netconn *conn;
-	uint32_t aging;
-}
-tcpclients_t;
-
-#endif
 
 
 /**
@@ -175,12 +176,16 @@ typedef struct
 	uint8_t u8Buffer[MAX_BUFFER]; //Modbus buffer for communication
 	uint8_t u8BufferSize;
 	uint8_t u8lastRec;
-	uint16_t *u16regs;
-	uint16_t *u16_fc1_data;//coils
-	uint16_t *u16_fc3_data;//registers
+	uint16_t *u16regsHR;
+	uint16_t *u16regsRO;
+	uint16_t *u16regsCoils;
+	uint16_t *u16regsCoilsRO;
 	uint16_t u16InCnt, u16OutCnt, u16errCnt; //keep statistics of Modbus traffic
 	uint16_t u16timeOut;
-	uint16_t u16regsize;
+	uint16_t u16regHR_size;
+	uint16_t u16regRO_size;
+	uint16_t u16regCoils_size;
+	uint16_t u16regCoilsRO_size;
 	uint8_t dataRX;
 	int8_t i8state;
 
@@ -202,20 +207,9 @@ typedef struct
 	// type of hardware  TCP, USB CDC, USART
 	mb_hardware_t xTypeHW;
 
-#if ENABLE_TCP == 1
+}
+modbusHandler_t;
 
-	tcpclients_t newconns[NUMBERTCPCONN];
-	struct netconn *conn;
-	uint32_t xIpAddress;
-	uint16_t u16TransactionID;
-	uint16_t uTcpPort; // this is only used for the slave (i.e., the server)
-	uint8_t newconnIndex;
-
-#endif
-
-}modbusHandler_t;
-
-extern modbusHandler_t Modbus_1;
 
 enum
 {
@@ -231,12 +225,7 @@ extern modbusHandler_t *mHandlers[MAX_M_HANDLERS];
 // Function prototypes
 void ModbusInit(modbusHandler_t * modH);
 void ModbusStart(modbusHandler_t * modH);
-void modbustask_init(void);
 
-#if ENABLE_USB_CDC == 1
-void ModbusStartCDC(modbusHandler_t * modH);
-#endif
-void modbus_configuration(void);
 void setTimeOut( uint16_t u16timeOut); //!<write communication watch-dog timer
 uint16_t getTimeOut(); //!<get communication watch-dog timer value
 bool getTimeOutState(); //!<get communication watch-dog timer state
@@ -245,14 +234,6 @@ void ModbusQueryInject(modbusHandler_t * modH, modbus_t telegram); //put a query
 void StartTaskModbusSlave(void *argument); //slave
 void StartTaskModbusMaster(void *argument); //master
 uint16_t calcCRC(uint8_t *Buffer, uint8_t u8length);
-bool mb_read_coil(modbusHandler_t *modH, int16_t address);
-void mb_write_coil(modbusHandler_t *modH, int16_t address, bool state);
-uint16_t mb_read_register(modbusHandler_t *modH, int16_t address);
-void mb_write_register(modbusHandler_t *modH, int16_t address,uint16_t *data,uint16_t len);
-#if ENABLE_TCP == 1
-void ModbusCloseConn(struct netconn *conn); //close the TCP connection
-void ModbusCloseConnNull(modbusHandler_t * modH); //close the TCP connection and cleans the modbus handler
-#endif
 
 
 //Function prototypes for ModbusRingBuffer
