@@ -38,7 +38,7 @@ const osMessageQueueAttr_t QueueTelegram_attributes = {
 const osThreadAttr_t myTaskModbusA_attributes = {
     .name = "TaskModbusSlave",
     .priority = (osPriority_t) osPriorityNormal,
-    .stack_size = 128 * 4
+    .stack_size = 128 * 10
 };
 
 
@@ -1039,13 +1039,30 @@ void buildException( uint8_t u8exception, modbusHandler_t *modH )
  */
 static void sendTxBuffer(modbusHandler_t *modH)
 {
+
+
     // append CRC to message
+
+#if  ENABLE_TCP == 1
+if(modH->xTypeHW != TCP_HW)
+	 {
+#endif
+
 	uint16_t u16crc = calcCRC(modH->u8Buffer, modH->u8BufferSize);
     modH->u8Buffer[ modH->u8BufferSize ] = u16crc >> 8;
     modH->u8BufferSize++;
     modH->u8Buffer[ modH->u8BufferSize ] = u16crc & 0x00ff;
     modH->u8BufferSize++;
 
+#if ENABLE_TCP == 1
+	 }
+#endif
+
+
+#if ENABLE_USB_CDC == 1 || ENABLE_TCP == 1
+    if(modH->xTypeHW == USART_HW || modH->xTypeHW == USART_HW_DMA )
+    {
+#endif
 
     	if (modH->EN_Port != NULL)
         {
@@ -1077,7 +1094,7 @@ static void sendTxBuffer(modbusHandler_t *modH)
 * USART datasheet and add the corresponding family in the following
 * preprocessor conditions
 */
-#if defined(STM32H7)  || defined(STM32F3) || defined(STM32L4) || defined(STM32L082xx) || defined(STM32F7) || defined(STM32WB)
+#if defined(STM32H7)  || defined(STM32F3) || defined(STM32L4) || defined(STM32L082xx) || defined(STM32F7) || defined(STM32WB) || defined(STM32G070xx) || defined(STM32F0) || defined(STM32G431xx) || defined(STM32H5)
           while((modH->port->Instance->ISR & USART_ISR_TC) ==0 )
 #else
           // F429, F103, L152 ...
@@ -1103,6 +1120,68 @@ static void sendTxBuffer(modbusHandler_t *modH)
          {
         	 xTimerReset(modH->xTimerTimeout,0);
          }
+#if ENABLE_USB_CDC == 1 || ENABLE_TCP == 1
+    }
+
+#if ENABLE_USB_CDC == 1
+    else if(modH->xTypeHW == USB_CDC_HW)
+	{
+    	CDC_Transmit_FS(modH->u8Buffer,  modH->u8BufferSize);
+    	// set timeout for master query
+    	if(modH->uModbusType == MB_MASTER )
+    	{
+    	   	xTimerReset(modH->xTimerTimeout,0);
+    	}
+
+	}
+#endif
+
+#if ENABLE_TCP == 1
+
+    else if(modH->xTypeHW == TCP_HW)
+    	{
+
+    	  struct netvector  xNetVectors[2];
+    	  uint8_t u8MBAPheader[6];
+    	  size_t uBytesWritten;
+
+
+    	  u8MBAPheader[0] = highByte(modH->u16TransactionID); // this might need improvement the transaction ID could be validated
+    	  u8MBAPheader[1] = lowByte(modH->u16TransactionID);
+    	  u8MBAPheader[2] = 0; //protocol ID
+    	  u8MBAPheader[3] = 0; //protocol ID
+    	  u8MBAPheader[4] = 0; //highbyte data length always 0
+    	  u8MBAPheader[5] = modH->u8BufferSize; //highbyte data length
+
+    	  xNetVectors[0].len = 6;
+    	  xNetVectors[0].ptr = (void *) u8MBAPheader;
+
+    	  xNetVectors[1].len = modH->u8BufferSize;
+    	  xNetVectors[1].ptr = (void *) modH->u8Buffer;
+
+
+    	  netconn_set_sendtimeout(modH->newconns[modH->newconnIndex].conn, modH->u16timeOut);
+    	  err_enum_t err;
+
+    	  err = netconn_write_vectors_partly(modH->newconns[modH->newconnIndex].conn, xNetVectors, 2, NETCONN_COPY, &uBytesWritten);
+    	  if (err != ERR_OK )
+    	  {
+
+    		 // ModbusCloseConn(modH->newconns[modH->newconnIndex].conn);
+    		 ModbusCloseConnNull(modH);
+
+    	  }
+
+
+    	  if(modH->uModbusType == MB_MASTER )
+    	  {
+    	    xTimerReset(modH->xTimerTimeout,0);
+    	  }
+    	}
+
+#endif
+
+#endif
 
      modH->u8BufferSize = 0;
      // increase message counter
@@ -1110,7 +1189,6 @@ static void sendTxBuffer(modbusHandler_t *modH)
 
 
 }
-
 
 /**
  * @brief
@@ -1127,49 +1205,65 @@ int8_t process_FC1(modbusHandler_t *modH, uint8_t Database)
     uint8_t u8CopyBufferSize;
     uint16_t u16currentCoil, u16coil;
 
-    uint16_t *u16regs;
+    uint16_t *u16regs = NULL;
 
-    // get the first and last coil from the message
-    uint16_t u16StartCoil = word( modH->u8Buffer[ ADD_HI ], modH->u8Buffer[ ADD_LO ] );
-    uint16_t u16Coilno = word( modH->u8Buffer[ NB_HI ], modH->u8Buffer[ NB_LO ] );
-
-    // put the number of bytes in the outcoming message
-    u8bytesno = (uint8_t) (u16Coilno / 8);
-    if (u16Coilno % 8 != 0) u8bytesno ++;
-    modH->u8Buffer[ ADD_HI ]  = u8bytesno;
-    modH->u8BufferSize         = ADD_LO;
-    modH->u8Buffer[modH->u8BufferSize + u8bytesno - 1 ] = 0;
-
-    // read each coil from the register map and put its value inside the outcoming message
-    u8bitsno = 0;
-
-    if (Database == 1){
-    	u16regs = modH->u16regsCoils;
+    // انتخاب دیتابیس مناسب
+    switch (Database) {
+        case 1:
+            u16regs = modH->u16regsCoils;
+            break;
+        case 2:
+            u16regs = modH->u16regsCoilsRO;
+            break;
+        default:
+            u16regs = modH->u16regsCoils; // دیتابیس پیش‌فرض
+            break;
     }
 
+    // بررسی مقداردهی اشاره‌گر
+    if (u16regs == NULL) {
+      debug_log(LOG_ERROR,"error of modbus database allocting");
+        return -1; // خطا: دیتابیس نامعتبر یا مقداردهی نشده
+    }
 
-    for (u16currentCoil = 0; u16currentCoil < u16Coilno; u16currentCoil++)
-    {
+    // استخراج آدرس شروع و تعداد کویل‌ها
+    uint16_t u16StartCoil = word(modH->u8Buffer[ADD_HI], modH->u8Buffer[ADD_LO]);
+    uint16_t u16Coilno    = word(modH->u8Buffer[NB_HI],  modH->u8Buffer[NB_LO]);
+
+    // محاسبه تعداد بایت‌های خروجی
+    u8bytesno = (uint8_t)(u16Coilno / 8);
+    if (u16Coilno % 8 != 0) u8bytesno++;
+    modH->u8Buffer[ADD_HI] = u8bytesno;
+    modH->u8BufferSize     = ADD_LO;
+
+    // مقداردهی اولیه آخرین بایت
+    modH->u8Buffer[modH->u8BufferSize + u8bytesno - 1] = 0;
+
+    // خواندن وضعیت کویل‌ها و نوشتن در بافر خروجی
+    u8bitsno = 0;
+    for (u16currentCoil = 0; u16currentCoil < u16Coilno; u16currentCoil++) {
         u16coil = u16StartCoil + u16currentCoil;
-        u16currentRegister =  (u16coil / 16);
-        u8currentBit = (uint8_t) (u16coil % 16);
+        u16currentRegister = u16coil / 16;
+        u8currentBit       = (uint8_t)(u16coil % 16);
 
         bitWrite(
-        	modH->u8Buffer[ modH->u8BufferSize ],
+            modH->u8Buffer[modH->u8BufferSize],
             u8bitsno,
-		    bitRead( u16regs[ u16currentRegister ], u8currentBit ) );
-        u8bitsno ++;
+            bitRead(u16regs[u16currentRegister], u8currentBit)
+        );
 
-        if (u8bitsno > 7)
-        {
+        u8bitsno++;
+        if (u8bitsno > 7) {
             u8bitsno = 0;
             modH->u8BufferSize++;
         }
     }
 
-    // send outcoming message
-    if (u16Coilno % 8 != 0) modH->u8BufferSize ++;
-    u8CopyBufferSize = modH->u8BufferSize +2;
+    // افزایش اندازه بافر در صورت باقی‌ماندن بیت‌ها
+    if (u16Coilno % 8 != 0) modH->u8BufferSize++;
+
+    // ارسال پیام خروجی
+    u8CopyBufferSize = modH->u8BufferSize + 2;
     sendTxBuffer(modH);
     return u8CopyBufferSize;
 }
