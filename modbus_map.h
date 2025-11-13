@@ -8,7 +8,7 @@ extern "C" {
 #include "main.h"
 
 /*--------------------------------------------------------------------coils---------------------------------------------------------------*/
-#define machin_is_active                   0
+#define machin_is_active                   122
 #define validation_cmd                     1
 #define power_machin_coil                  2
 #define paper_absense_sensor               3
@@ -130,9 +130,13 @@ extern "C" {
 #define input_12_mode                      116
 #define input_13_flag                      117
 #define input_13_mode                      118
+#define reset_cmd                          119
+#define belt_co_cmd                        120
+#define machin_commuication_mode           121
+#define manual_empty_pag_cmd               123
 
 /*-------------------------------------------------------------------parameters-----------------------------------------------------------*/
-#define output_1_config                     0
+#define output_1_config                     58
 #define output_2_config                     1
 #define output_3_config                     2
 #define output_4_config                     3
@@ -188,6 +192,7 @@ extern "C" {
 #define mb_machin_id_4                      53
 #define mb_machin_id_5                      54
 #define mb_machin_id_6                      55
+#define mb_hw_version                       56
 
 /*----------------------------------------------------------------------------------------------------------------------------------------*/
 #ifdef __cplusplus

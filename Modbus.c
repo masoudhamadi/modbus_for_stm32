@@ -38,7 +38,7 @@ const osMessageQueueAttr_t QueueTelegram_attributes = {
 const osThreadAttr_t myTaskModbusA_attributes = {
     .name = "TaskModbusSlave",
     .priority = (osPriority_t) osPriorityNormal,
-    .stack_size = 128 * 10
+    .stack_size = 128 * 20
 };
 
 
