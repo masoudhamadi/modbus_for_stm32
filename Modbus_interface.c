@@ -1,18 +1,29 @@
 /* Includes ------------------------------------------------------------------*/
-#include "main.h"
-#include "Modbus.h"
+#include "Modbus_interface.h"
+#include "BitUtils.h"
 
 
 
-#define bitRead(value, bit) (((value) >> (bit)) & 0x01)
-#define bitSet(value, bit) ((value) |= (1UL << (bit)))
-#define bitClear(value, bit) ((value) &= ~(1UL << (bit)))
-#define bitWrite(value, bit, bitvalue) ((bitvalue) ? bitSet(value, bit) : bitClear(value, bit))
-#define lowByte(w) ((w) & 0xff)
-#define highByte(w) ((w) >> 8)
 
 
 /*--------------------------------------------------------------------*/
+void mb_config(void){
+  ModbusH.uModbusType = MB_SLAVE;
+  ModbusH.port = &huart3;
+  ModbusH.u8id = 1;
+  ModbusH.u16timeOut = 1000;
+  ModbusH.EN_Port = ENB_GPIO_Port;
+  ModbusH.EN_Pin = ENB_Pin;
+  ModbusH.u16regsHR = Holding_Registers_Database;
+  ModbusH.u16regsRO = Input_Register_Database;
+  ModbusH.u16regsCoils = Holding_Coils_Database;
+  ModbusH.u16regsCoilsRO = Input_Coils_Database;
+  ModbusH.u16regHR_size = sizeof(Holding_Registers_Database)/sizeof(Holding_Registers_Database[0]);
+  ModbusH.u16regRO_size = sizeof(Input_Register_Database)/sizeof(Input_Register_Database[0]);
+  ModbusH.u16regCoils_size = sizeof(Holding_Coils_Database)/sizeof(Holding_Coils_Database[0]);
+  ModbusH.u16regCoilsRO_size = sizeof(Input_Coils_Database)/sizeof(Input_Coils_Database[0]);
+  ModbusH.xTypeHW = USART_HW_DMA;
+}
 bool mb_read_coil(modbusHandler_t *modH, int16_t address){
 	
 	     uint16_t u16currentRegister =  (address / 16);

@@ -17,7 +17,8 @@ extern "C" {
 /************************************
  * INCLUDES
  ************************************/
-
+#include "main.h"
+#include "Modbus.h"
 /************************************
  * MACROS AND DEFINES
  ************************************/
@@ -25,6 +26,7 @@ extern "C" {
 /************************************
  * TYPEDEFS
  ************************************/
+void mb_config(void);
 bool mb_read_coil(modbusHandler_t *modH, int16_t address);
 void mb_write_coil(modbusHandler_t *modH, int16_t address, bool state);
 uint16_t mb_read_register(modbusHandler_t *modH, int16_t address);
