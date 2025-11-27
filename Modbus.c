@@ -23,15 +23,14 @@
  * ======================================================================= */
 
 /* --- Common static prototypes (local to common section) --- */
-void     sendTxBuffer(modbusHandler_t *modH);
-int16_t  getRxBuffer(modbusHandler_t *modH);
-uint8_t  validateAnswer(modbusHandler_t *modH);
-void     buildException(uint8_t u8exception, modbusHandler_t *modH);
-int8_t   validateRequest(modbusHandler_t *modH);
-uint16_t word(uint8_t H, uint8_t L);
-void     vTimerCallbackT35(TimerHandle_t *pxTimer);
-void     vTimerCallbackTimeout(TimerHandle_t *pxTimer);
-
+static void     sendTxBuffer(modbusHandler_t *modH);
+static int16_t  getRxBuffer(modbusHandler_t *modH);
+static uint8_t  validateAnswer(modbusHandler_t *modH);
+static void     buildException(uint8_t u8exception, modbusHandler_t *modH);
+static int8_t   validateRequest(modbusHandler_t *modH);
+static uint16_t word(uint8_t H, uint8_t L);
+static void     vTimerCallbackT35(TimerHandle_t *pxTimer);
+static void     vTimerCallbackTimeout(TimerHandle_t *pxTimer);
 modbusHandler_t *mHandlers[MAX_M_HANDLERS];
 uint8_t numberHandlers = 0;
 
@@ -265,7 +264,7 @@ void ModbusStart(modbusHandler_t *modH)
 }
 
 /* --- Timer callbacks --- */
-void vTimerCallbackT35(TimerHandle_t *pxTimer)
+static void vTimerCallbackT35(TimerHandle_t *pxTimer)
 {
     // Notify that a stream has just arrived
     for (int i = 0; i < numberHandlers; i++)
@@ -281,7 +280,7 @@ void vTimerCallbackT35(TimerHandle_t *pxTimer)
     }
 }
 
- void vTimerCallbackTimeout(TimerHandle_t *pxTimer)
+ static void vTimerCallbackTimeout(TimerHandle_t *pxTimer)
 {
     for (int i = 0; i < numberHandlers; i++)
     {
@@ -293,7 +292,7 @@ void vTimerCallbackT35(TimerHandle_t *pxTimer)
 }
 
 /* --- RX buffer --- */
-int16_t getRxBuffer(modbusHandler_t *modH)
+static int16_t getRxBuffer(modbusHandler_t *modH)
 {
     int16_t i16result;
 
@@ -323,7 +322,7 @@ int16_t getRxBuffer(modbusHandler_t *modH)
 }
 
 /* --- Master answer validation --- */
- uint8_t validateAnswer(modbusHandler_t *modH)
+static uint8_t validateAnswer(modbusHandler_t *modH)
 {
     // check message crc vs calculated crc
     uint16_t u16MsgCRC = ((modH->u8Buffer[modH->u8BufferSize - 2] << 8)
@@ -362,7 +361,7 @@ int16_t getRxBuffer(modbusHandler_t *modH)
 }
 
 /* --- Slave request validation --- */
- int8_t validateRequest(modbusHandler_t *modH)
+static int8_t validateRequest(modbusHandler_t *modH)
 {
     // check message crc vs calculated crc
     uint16_t u16MsgCRC = ((modH->u8Buffer[modH->u8BufferSize - 2] << 8)
@@ -437,7 +436,7 @@ int16_t getRxBuffer(modbusHandler_t *modH)
 }
 
 /* --- Helpers: word and CRC --- */
-uint16_t word(uint8_t H, uint8_t L)
+static uint16_t word(uint8_t H, uint8_t L)
 {
     bytesFields W;
     W.u8[0] = L;
@@ -468,7 +467,7 @@ uint16_t calcCRC(uint8_t *Buffer, uint8_t u8length)
 }
 
 /* --- Build exception --- */
-void buildException(uint8_t u8exception, modbusHandler_t *modH)
+static void buildException(uint8_t u8exception, modbusHandler_t *modH)
 {
     uint8_t u8func = modH->u8Buffer[FUNC];  // original FUNC code
 
@@ -479,7 +478,7 @@ void buildException(uint8_t u8exception, modbusHandler_t *modH)
 }
 
 /* --- Transmit buffer --- */
-void sendTxBuffer(modbusHandler_t *modH)
+static void sendTxBuffer(modbusHandler_t *modH)
 {
     // append CRC to message
 #if ENABLE_TCP == 1
