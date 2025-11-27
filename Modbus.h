@@ -1,15 +1,17 @@
-/*
- * Modbus.h
- *
- *  Created on: May 5, 2020
- *      Author: Alejandro Mera
- *      Modified: Nov 2025 (EEPROM integration, bit-packed coils)
- */
+/******************************************************************************
+ * File:    Modbus.h
+ * Brief:   Unified Modbus header for Common / Slave / Master modules
+ * Author:  Alejandro Mera (original), adapted by Mas
+ * Date:    Nov 2025
+ ******************************************************************************/
 
 #ifndef THIRD_PARTY_MODBUS_INC_MODBUS_H_
 #define THIRD_PARTY_MODBUS_INC_MODBUS_H_
 
+#include "main.h"
 #include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 #include "BitUtils.h"
 #include "ModbusConfig.h"
 #include "FreeRTOS.h"
@@ -19,10 +21,10 @@
 #include "timers.h"
 
 /* ------------------------- تنظیمات حافظه EEPROM ------------------------- */
-#define AT24_BASE_ADDR      ((uint16_t)0x0000)   // آدرس شروع کلی
-#define DB_COUNT            (3)                  // تعداد دیتابیس‌ها
-#define COILS_PER_DB        (1024)               // تعداد کویل در هر دیتابیس
-#define REGS_PER_DB         (512)                // تعداد رجیستر در هر دیتابیس
+#define AT24_BASE_ADDR      ((uint16_t)0x0000)   /* آدرس شروع کلی */
+#define DB_COUNT            (3)                  /* تعداد دیتابیس‌ها */
+#define COILS_PER_DB        (1024)               /* تعداد کویل در هر دیتابیس */
+#define REGS_PER_DB         (512)                /* تعداد رجیستر در هر دیتابیس */
 
 /* هر کویل یک بیت است → هر دیتابیس = COILS_PER_DB/8 بایت */
 #define COILS_BASE_ADDR     (AT24_BASE_ADDR)
@@ -31,7 +33,6 @@
 /* رجیسترها بعد از کویل‌ها ذخیره می‌شوند → هر رجیستر ۲ بایت */
 #define REGS_BASE_ADDR      (COILS_BASE_ADDR + TOTAL_COILS_BYTES)
 #define TOTAL_REGS_BYTES    (DB_COUNT * REGS_PER_DB * 2)
-
 
 /* ------------------------- انواع داده ------------------------- */
 typedef enum { USART_HW = 1, USART_HW_DMA = 4 } mb_hardware_t;
@@ -47,6 +48,10 @@ typedef enum MB_FC {
     MB_FC_WRITE_MULTIPLE_COILS     = 15,
     MB_FC_WRITE_MULTIPLE_REGISTERS = 16
 } mb_functioncode_t;
+
+#ifndef MAX_BUFFER
+#define MAX_BUFFER 256
+#endif
 
 typedef struct {
     uint8_t uxBuffer[MAX_BUFFER];
@@ -69,25 +74,25 @@ typedef enum MESSAGE {
 typedef enum COM_STATES { COM_IDLE = 0, COM_WAITING = 1 } mb_com_state_t;
 
 typedef enum ERR_LIST {
-    ERR_NOT_MASTER   = -1,
-    ERR_POLLING      = -2,
-    ERR_BUFF_OVERFLOW= -3,
-    ERR_BAD_CRC      = -4,
-    ERR_EXCEPTION    = -5,
-    ERR_BAD_SIZE     = -6,
-    ERR_BAD_ADDRESS  = -7,
-    ERR_TIME_OUT     = -8,
-    ERR_BAD_SLAVE_ID = -9,
-    ERR_BAD_TCP_ID   = -10,
-    ERR_OK_QUERY     = -11
+    ERR_NOT_MASTER    = -1,
+    ERR_POLLING       = -2,
+    ERR_BUFF_OVERFLOW = -3,
+    ERR_BAD_CRC       = -4,
+    ERR_EXCEPTION     = -5,
+    ERR_BAD_SIZE      = -6,
+    ERR_BAD_ADDRESS   = -7,
+    ERR_TIME_OUT      = -8,
+    ERR_BAD_SLAVE_ID  = -9,
+    ERR_BAD_TCP_ID    = -10,
+    ERR_OK_QUERY      = -11
 } mb_errot_t;
 
 /* ------------------------- کدهای Exception پروتکل Modbus ------------------------- */
 enum {
-    EXC_FUNC_CODE   = 1,  // Function code not supported
-    EXC_ADDR_RANGE  = 2,  // Address out of range
-    EXC_REGS_QUANT  = 3,  // Invalid quantity of registers/coils
-    EXC_EXECUTE     = 4   // Execution error
+    EXC_FUNC_CODE   = 1,  /* Function code not supported */
+    EXC_ADDR_RANGE  = 2,  /* Address out of range */
+    EXC_REGS_QUANT  = 3,  /* Invalid quantity of registers/coils */
+    EXC_EXECUTE     = 4   /* Execution error */
 };
 
 typedef union {
@@ -145,27 +150,60 @@ typedef struct {
 
 enum { RESPONSE_SIZE = 6, EXCEPTION_SIZE = 3, CHECKSUM_SIZE = 2 };
 
+/* Globals shared across modules */
 extern modbusHandler_t *mHandlers[MAX_M_HANDLERS];
 extern uint8_t numberHandlers;
 
-/* ------------------------- پروتوتایپ توابع ------------------------- */
-// مدیریت عمومی
+/* ------------------------- پروتوتایپ توابع عمومی ------------------------- */
+/* مدیریت عمومی */
 void ModbusInit(modbusHandler_t * modH);
 void ModbusStart(modbusHandler_t * modH);
 void setTimeOut(uint16_t u16timeOut);
-uint16_t getTimeOut();
-bool getTimeOutState();
+uint16_t getTimeOut(void);
+bool getTimeOutState(void);
+
+/* Master helpers (public API) */
 void ModbusQuery(modbusHandler_t * modH, modbus_t telegram);
 void ModbusQueryInject(modbusHandler_t * modH, modbus_t telegram);
+
+/* Tasks (public) */
 void StartTaskModbusSlave(void *argument);
 void StartTaskModbusMaster(void *argument);
+
+/* CRC (public) */
 uint16_t calcCRC(uint8_t *Buffer, uint8_t u8length);
 
-// Ring buffer
+/* Ring buffer (public) */
 void RingAdd(modbusRingBuffer_t *xRingBuffer, uint8_t u8Val);
 uint8_t RingGetAllBytes(modbusRingBuffer_t *xRingBuffer, uint8_t *buffer);
 uint8_t RingGetNBytes(modbusRingBuffer_t *xRingBuffer, uint8_t *buffer, uint8_t uNumber);
 uint8_t RingCountBytes(modbusRingBuffer_t *xRingBuffer);
 void RingClear(modbusRingBuffer_t *xRingBuffer);
+
+/* ------------------------- پروتوتایپ توابع داخلی مشترک (غیر-extern) ----------
+   این توابع در ModbusCommon.c پیاده‌سازی می‌شوند و توسط Slave/Master فراخوانی
+   می‌گردند. اعلان آن‌ها در هدر برای دسترسی داخلی لازم است اما تعریف آن‌ها
+   در فایل مشترک (ModbusCommon.c) به صورت non-static انجام شده تا لینک بین
+   فایل‌ها برقرار شود. اگر می‌خواهی برخی را کاملاً محلی نگه داری، آن‌ها را
+   static کن و این اعلان را حذف کن. ------------------------------------------------*/
+
+/* انتقال بسته (اضافه کردن CRC و ارسال روی رابط انتخابی) */
+void sendTxBuffer(modbusHandler_t *modH);
+
+/* خواندن داده‌های دریافتی از حلقهٔ RX به u8Buffer */
+int16_t getRxBuffer(modbusHandler_t *modH);
+
+/* اعتبارسنجی پاسخ دریافتی (برای Master) */
+uint8_t validateAnswer(modbusHandler_t *modH);
+
+/* اعتبارسنجی درخواست دریافتی (برای Slave) */
+int8_t validateRequest(modbusHandler_t *modH);
+
+/* تبدیل دو بایت به uint16_t (کمک‌کننده) */
+uint16_t word(uint8_t H, uint8_t L);
+
+/* Callback های تایمر (T3.5 و timeout) */
+void vTimerCallbackT35(TimerHandle_t *pxTimer);
+void vTimerCallbackTimeout(TimerHandle_t *pxTimer);
 
 #endif /* THIRD_PARTY_MODBUS_INC_MODBUS_H_ */
