@@ -25,7 +25,6 @@
 /* --- Common static prototypes (local to common section) --- */
 static void     sendTxBuffer(modbusHandler_t *modH);
 static int16_t  getRxBuffer(modbusHandler_t *modH);
-static uint8_t  validateAnswer(modbusHandler_t *modH);
 static void     buildException(uint8_t u8exception, modbusHandler_t *modH);
 static int8_t   validateRequest(modbusHandler_t *modH);
 static uint16_t word(uint8_t H, uint8_t L);
@@ -33,9 +32,6 @@ static void     vTimerCallbackT35(TimerHandle_t *pxTimer);
 static void     vTimerCallbackTimeout(TimerHandle_t *pxTimer);
 modbusHandler_t *mHandlers[MAX_M_HANDLERS];
 uint8_t numberHandlers = 0;
-
-/// Queue Modbus telegrams for master
-const osMessageQueueAttr_t QueueTelegram_attributes = { .name = "QueueModbusTelegram" };
 
 const osThreadAttr_t myTaskModbusA_attributes = {
     .name = "TaskModbusSlave",
@@ -121,23 +117,14 @@ void ModbusInit(modbusHandler_t *modH)
     {
         // Initialize the ring buffer
         RingClear(&modH->xBufferRX);
-
-        if (modH->uModbusType == MB_SLAVE)
-        {
-            // Create Modbus task slave
-            modH->myTaskModbusAHandle = osThreadNew(StartTaskModbusSlave, modH, &myTaskModbusA_attributes);
-        }
-
-        else
-        {
-            while (1) { /* Error Modbus type not supported */ }
-        }
-
+      /*------------------------------------------------------------*/
+        // Create Modbus task slave
+        modH->myTaskModbusAHandle = osThreadNew(StartTaskModbusSlave, modH, &myTaskModbusA_attributes);
         if (modH->myTaskModbusAHandle == NULL)
         {
             while (1) { /* Error creating Modbus task */ }
         }
-
+       /*----------------------------------------------------------*/
         modH->xTimerT35 = xTimerCreate(
             "TimerT35",                    // name
             T35,                           // period in ticks
@@ -149,13 +136,13 @@ void ModbusInit(modbusHandler_t *modH)
         {
             while (1) { /* Error creating the timer */ }
         }
-
+      /*----------------------------------------------------------*/
         modH->ModBusSphrHandle = osSemaphoreNew(1, 1, &ModBusSphr_attributes);
         if (modH->ModBusSphrHandle == NULL)
         {
             while (1) { /* Error creating the semaphore */ }
         }
-
+      /*----------------------------------------------------------*/
         mHandlers[numberHandlers] = modH;
         numberHandlers++;
     }
@@ -185,7 +172,7 @@ void ModbusStart(modbusHandler_t *modH)
             HAL_GPIO_WritePin(modH->EN_Port, modH->EN_Pin, GPIO_PIN_RESET);
         }
 
-        if (modH->uModbusType == MB_SLAVE && modH->u16regsHR == NULL)
+        if (modH->u16regsHR == NULL)
         {
             while (1) { /* ERROR define the DATA pointer shared through Modbus */ }
         }
@@ -220,12 +207,7 @@ void ModbusStart(modbusHandler_t *modH)
         }
 #endif
 
-        if (modH->u8id != 0 && modH->uModbusType == MB_MASTER)
-        {
-            while (1) { /* error Master ID must be zero */ }
-        }
-
-        if (modH->u8id == 0 && modH->uModbusType == MB_SLAVE)
+        if (modH->u8id == 0)
         {
             while (1) { /* error Slave ID must be non-zero */ }
         }
@@ -243,10 +225,6 @@ static void vTimerCallbackT35(TimerHandle_t *pxTimer)
     {
         if ((TimerHandle_t *)mHandlers[i]->xTimerT35 == pxTimer)
         {
-            if (mHandlers[i]->uModbusType == MB_MASTER)
-            {
-                xTimerStop(mHandlers[i]->xTimerTimeout, 0);
-            }
             xTaskNotify(mHandlers[i]->myTaskModbusAHandle, 0, eSetValueWithOverwrite);
         }
     }
@@ -291,45 +269,6 @@ static int16_t getRxBuffer(modbusHandler_t *modH)
     }
 
     return i16result;
-}
-
-/* --- Master answer validation --- */
-static uint8_t validateAnswer(modbusHandler_t *modH)
-{
-    // check message crc vs calculated crc
-    uint16_t u16MsgCRC = ((modH->u8Buffer[modH->u8BufferSize - 2] << 8)
-                         | modH->u8Buffer[modH->u8BufferSize - 1]); // combine CRC
-
-    if (calcCRC(modH->u8Buffer, modH->u8BufferSize - 2) != u16MsgCRC)
-    {
-        modH->u16errCnt++;
-        return ERR_BAD_CRC;
-    }
-
-    // check exception
-    if ((modH->u8Buffer[FUNC] & 0x80) != 0)
-    {
-        modH->u16errCnt++;
-        return ERR_EXCEPTION;
-    }
-
-    // check fct code
-    bool isSupported = false;
-    for (uint8_t i = 0; i < sizeof(fctsupported); i++)
-    {
-        if (fctsupported[i] == modH->u8Buffer[FUNC])
-        {
-            isSupported = true;
-            break;
-        }
-    }
-    if (!isSupported)
-    {
-        modH->u16errCnt++;
-        return EXC_FUNC_CODE;
-    }
-
-    return 0; // OK
 }
 
 /* --- Slave request validation --- */
@@ -512,11 +451,6 @@ static void sendTxBuffer(modbusHandler_t *modH)
             HAL_HalfDuplex_EnableReceiver(modH->port);
         }
 
-        // set timeout for master query
-        if (modH->uModbusType == MB_MASTER)
-        {
-            xTimerReset(modH->xTimerTimeout, 0);
-        }
 #if ENABLE_USB_CDC == 1 || ENABLE_TCP == 1
     }
 

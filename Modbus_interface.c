@@ -8,7 +8,6 @@
 
 /*--------------------------------------------------------------------*/
 void mb_config(void){
-  ModbusH.uModbusType = MB_SLAVE;
   ModbusH.port = &huart3;
   ModbusH.u8id = 1;
   ModbusH.u16timeOut = 1000;

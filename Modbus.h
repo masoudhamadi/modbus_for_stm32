@@ -36,7 +36,6 @@
 
 /* ------------------------- انواع داده ------------------------- */
 typedef enum { USART_HW = 1, USART_HW_DMA = 4 } mb_hardware_t;
-typedef enum { MB_SLAVE = 3, MB_MASTER = 4 } mb_masterslave_t;
 
 typedef enum MB_FC {
     MB_FC_READ_COILS               = 1,
@@ -117,7 +116,6 @@ typedef struct {
 } modbus_t;
 
 typedef struct {
-    mb_masterslave_t uModbusType;
     UART_HandleTypeDef *port;
     uint8_t u8id;
     GPIO_TypeDef* EN_Port;
