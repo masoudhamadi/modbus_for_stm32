@@ -1,7 +1,7 @@
 /******************************************************************************
  * File:    Modbus.h
  * Brief:   Unified Modbus header for Common / Slave / Master modules
- * Author:  Alejandro Mera (original), adapted by Mas
+ * Author:  Alejandro Mera (original), adapted by Masoud hamadi
  * Date:    Nov 2025
  ******************************************************************************/
 
@@ -72,7 +72,6 @@ typedef enum MESSAGE {
 } mb_message_t;
 
 typedef enum COM_STATES { COM_IDLE = 0, COM_WAITING = 1 } mb_com_state_t;
-
 typedef enum ERR_LIST {
     ERR_NOT_MASTER    = -1,
     ERR_POLLING       = -2,
@@ -162,48 +161,21 @@ void setTimeOut(uint16_t u16timeOut);
 uint16_t getTimeOut(void);
 bool getTimeOutState(void);
 
-/* Master helpers (public API) */
-void ModbusQuery(modbusHandler_t * modH, modbus_t telegram);
-void ModbusQueryInject(modbusHandler_t * modH, modbus_t telegram);
 
 /* Tasks (public) */
 void StartTaskModbusSlave(void *argument);
-void StartTaskModbusMaster(void *argument);
+//void StartTaskModbusMaster(void *argument);
 
 /* CRC (public) */
 uint16_t calcCRC(uint8_t *Buffer, uint8_t u8length);
 
 /* Ring buffer (public) */
-void RingAdd(modbusRingBuffer_t *xRingBuffer, uint8_t u8Val);
+void    RingAdd(modbusRingBuffer_t *xRingBuffer, uint8_t u8Val);
 uint8_t RingGetAllBytes(modbusRingBuffer_t *xRingBuffer, uint8_t *buffer);
 uint8_t RingGetNBytes(modbusRingBuffer_t *xRingBuffer, uint8_t *buffer, uint8_t uNumber);
 uint8_t RingCountBytes(modbusRingBuffer_t *xRingBuffer);
-void RingClear(modbusRingBuffer_t *xRingBuffer);
+void    RingClear(modbusRingBuffer_t *xRingBuffer);
 
-///* ------------------------- پروتوتایپ توابع داخلی مشترک (غیر-extern) ----------
-//   این توابع در ModbusCommon.c پیاده‌سازی می‌شوند و توسط Slave/Master فراخوانی
-//   می‌گردند. اعلان آن‌ها در هدر برای دسترسی داخلی لازم است اما تعریف آن‌ها
-//   در فایل مشترک (ModbusCommon.c) به صورت non-static انجام شده تا لینک بین
-//   فایل‌ها برقرار شود. اگر می‌خواهی برخی را کاملاً محلی نگه داری، آن‌ها را
-//   static کن و این اعلان را حذف کن. ------------------------------------------------*/
 
-///* انتقال بسته (اضافه کردن CRC و ارسال روی رابط انتخابی) */
-//void sendTxBuffer(modbusHandler_t *modH);
-
-///* خواندن داده‌های دریافتی از حلقهٔ RX به u8Buffer */
-//int16_t getRxBuffer(modbusHandler_t *modH);
-
-///* اعتبارسنجی پاسخ دریافتی (برای Master) */
-//uint8_t validateAnswer(modbusHandler_t *modH);
-
-///* اعتبارسنجی درخواست دریافتی (برای Slave) */
-//int8_t validateRequest(modbusHandler_t *modH);
-
-///* تبدیل دو بایت به uint16_t (کمک‌کننده) */
-//uint16_t word(uint8_t H, uint8_t L);
-
-///* Callback های تایمر (T3.5 و timeout) */
-//void vTimerCallbackT35(TimerHandle_t *pxTimer);
-//void vTimerCallbackTimeout(TimerHandle_t *pxTimer);
 
 #endif /* THIRD_PARTY_MODBUS_INC_MODBUS_H_ */
