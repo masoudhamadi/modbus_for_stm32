@@ -164,7 +164,6 @@ bool getTimeOutState(void);
 
 /* Tasks (public) */
 void StartTaskModbusSlave(void *argument);
-//void StartTaskModbusMaster(void *argument);
 
 /* CRC (public) */
 uint16_t calcCRC(uint8_t *Buffer, uint8_t u8length);
