@@ -1,12 +1,13 @@
 /*
  * Modbus.c — unified Modbus RTU slave for STM32F405 + FreeRTOS + HAL
+ * - DMA-only RX path (ReceiveToIdle)
  * - Static RAM DBs for Coils/Registers
  * - Shared handlers
  * - Init/Start
  * - Full processing of FC1, FC3, FC5, FC6, FC15, FC16 with bounds/limits
  * - Frame validation (slave address + CRC)
  * - RS-485 DE control
- * - ISR-driven RX and task processing
+ * - ISR-driven DMA RxEvent and task processing
  */
 
 #include "Modbus.h"
@@ -16,7 +17,7 @@
 #include "timers.h"
 #include "cmsis_os.h"
 
-/* ------------------------- Modbus limits ------------------------- */
+/* ------------------------- Modbus function limits ------------------------- */
 #ifndef MODBUS_MAX_READ_REGS
 #define MODBUS_MAX_READ_REGS    125U
 #endif
@@ -91,27 +92,24 @@ void ModbusInit(modbusHandler_t *modH,
 
     modH->dataRX = 0U;
     modH->i8state = 0;
+
+    memset(&modH->xBufferRX, 0, sizeof(modH->xBufferRX));
 }
 
 void ModbusStart(modbusHandler_t *modH) {
     if (modH == NULL || modH->port == NULL) return;
 
+    /* DE in receive mode */
     if (modH->EN_Port != NULL) {
         HAL_GPIO_WritePin(modH->EN_Port, modH->EN_Pin, GPIO_PIN_RESET);
     }
 
-    (void)HAL_UART_Receive_IT(modH->port, &modH->dataRX, 1U);
-    modH->u8BufferSize = 0U;
-
-#if ENABLE_USART_DMA == 1
-    if (modH->xTypeHW == USART_HW_DMA) {
-        if (HAL_UARTEx_ReceiveToIdle_DMA(modH->port, modH->xBufferRX.uxBuffer, MAX_BUFFER) == HAL_OK) {
-            if (modH->port->hdmarx != NULL) {
-                __HAL_DMA_DISABLE_IT(modH->port->hdmarx, DMA_IT_HT);
-            }
+    /* DMA-only receive to idle */
+    if (HAL_UARTEx_ReceiveToIdle_DMA(modH->port, modH->xBufferRX.uxBuffer, MAX_BUFFER) == HAL_OK) {
+        if (modH->port->hdmarx != NULL) {
+            __HAL_DMA_DISABLE_IT(modH->port->hdmarx, DMA_IT_HT);
         }
     }
-#endif
 }
 
 /* ------------------------- Function Codes ------------------------- */
@@ -314,6 +312,15 @@ static void handle_frame(modbusHandler_t *modH)
 {
     if (modH == NULL) return;
 
+    /* For DMA-only path, copy staged bytes to line buffer before parsing */
+    if (modH->xBufferRX.u8available == 0U) return;
+
+    /* Move DMA payload into linear u8Buffer and set size */
+    uint16_t size = (modH->xBufferRX.u8available > MAX_BUFFER) ? MAX_BUFFER : modH->xBufferRX.u8available;
+    memcpy(modH->u8Buffer, modH->xBufferRX.uxBuffer, size);
+    modH->u8BufferSize = (uint8_t)size;
+    modH->xBufferRX.u8available = 0U;
+
     if (modH->u8BufferSize < 4U) {
         modH->u16errCnt++;
         modH->u8BufferSize = 0U;
@@ -368,6 +375,7 @@ static void handle_frame(modbusHandler_t *modH)
 
     if (addr != 0x00U && modH->u8BufferSize > 0U) {
         transmit_response(modH);
+        modH->u16OutCnt++;
     } else {
         modH->u8BufferSize = 0U;
     }
@@ -388,6 +396,7 @@ static void transmit_response(modbusHandler_t *modH)
     modH->u8Buffer[modH->u8BufferSize++] = (uint8_t)(crc >> 8);
     modH->u8Buffer[modH->u8BufferSize++] = (uint8_t)(crc & 0xFF);
 
+    /* drive DE high before TX */
     if (modH->EN_Port != NULL) {
         HAL_GPIO_WritePin(modH->EN_Port, modH->EN_Pin, GPIO_PIN_SET);
     }
@@ -398,8 +407,6 @@ static void transmit_response(modbusHandler_t *modH)
         }
         modH->u16errCnt++;
         modH->u8BufferSize = 0U;
-    } else {
-        modH->u16OutCnt++;
     }
 }
 
@@ -421,6 +428,7 @@ void StartTaskModbusSlave(void *argument)
 {
     modbusHandler_t *modH = (modbusHandler_t*)argument;
     for (;;) {
+        /* Wait for DMA RxEvent/TxCplt notifications */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         handle_frame(modH);
         modH->u8BufferSize = 0U;
@@ -474,7 +482,7 @@ void mb_write_register(modbusHandler_t *modH, uint8_t db, int16_t address,
     taskEXIT_CRITICAL();
 }
 
-/* ------------------------- HAL Callbacks ------------------------- */
+/* ------------------------- HAL Callbacks (DMA only) ------------------------- */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -484,44 +492,15 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
         modbusHandler_t *mh = mHandlers[i];
         if ((mh != NULL) && (mh->port == huart))
         {
+            /* clear DE after TX */
             if (mh->EN_Port != NULL) {
                 HAL_GPIO_WritePin(mh->EN_Port, mh->EN_Pin, GPIO_PIN_RESET);
             }
 
+            /* notify Modbus task */
             if (mh->myTaskModbusAHandle != NULL)
             {
                 vTaskNotifyGiveFromISR(mh->myTaskModbusAHandle, &xHigherPriorityTaskWoken);
-            }
-
-            (void)HAL_UART_Receive_IT(huart, &mh->dataRX, 1U);
-            break;
-        }
-    }
-
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    for (int i = 0; i < numberHandlers; i++)
-    {
-        modbusHandler_t *mh = mHandlers[i];
-        if ((mh != NULL) && (mh->port == huart))
-        {
-            if (mh->u8BufferSize < MAX_BUFFER) {
-                mh->u8Buffer[mh->u8BufferSize++] = mh->dataRX;
-            } else {
-                mh->u16errCnt++;
-                mh->u8BufferSize = 0U;
-            }
-
-            (void)HAL_UART_Receive_IT(huart, &mh->dataRX, 1U);
-
-            if (mh->xTimerT35 != NULL)
-            {
-                xTimerResetFromISR(mh->xTimerT35, &xHigherPriorityTaskWoken);
             }
             break;
         }
@@ -537,32 +516,27 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         modbusHandler_t *mh = mHandlers[i];
         if ((mh != NULL) && (mh->port == huart))
         {
-#if ENABLE_USART_DMA == 1
-            if (mh->xTypeHW == USART_HW_DMA)
+            HAL_UART_DMAStop(mh->port);
+
+            int attempts = 0;
+            const int max_attempts = 3;
+            while ((HAL_UARTEx_ReceiveToIdle_DMA(mh->port, mh->xBufferRX.uxBuffer, MAX_BUFFER) != HAL_OK) &&
+                   (++attempts < max_attempts))
             {
                 HAL_UART_DMAStop(mh->port);
+            }
 
-                int attempts = 0;
-                const int max_attempts = 3;
-                while ((HAL_UARTEx_ReceiveToIdle_DMA(mh->port, mh->xBufferRX.uxBuffer, MAX_BUFFER) != HAL_OK) &&
-                       (++attempts < max_attempts))
+            if (attempts >= max_attempts)
+            {
+                mh->u16errCnt++;
+            }
+            else
+            {
+                if (mh->port->hdmarx != NULL)
                 {
-                    HAL_UART_DMAStop(mh->port);
-                }
-
-                if (attempts >= max_attempts)
-                {
-                    mh->u16errCnt++;
-                }
-                else
-                {
-                    if (mh->port->hdmarx != NULL)
-                    {
-                        __HAL_DMA_DISABLE_IT(mh->port->hdmarx, DMA_IT_HT);
-                    }
+                    __HAL_DMA_DISABLE_IT(mh->port->hdmarx, DMA_IT_HT);
                 }
             }
-#endif
             break;
         }
     }
@@ -577,43 +551,38 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         modbusHandler_t *mh = mHandlers[i];
         if ((mh != NULL) && (mh->port == huart))
         {
-#if ENABLE_USART_DMA == 1
-            if (mh->xTypeHW == USART_HW_DMA)
+            if (Size > 0U)
             {
-                if (Size > 0U)
+                mh->xBufferRX.u8available = Size;
+                mh->xBufferRX.overflow = false;
+
+                int attempts = 0;
+                const int max_attempts = 3;
+                while ((HAL_UARTEx_ReceiveToIdle_DMA(mh->port, mh->xBufferRX.uxBuffer, MAX_BUFFER) != HAL_OK) &&
+                       (++attempts < max_attempts))
                 {
-                    mh->xBufferRX.u8available = Size;
-                    mh->xBufferRX.overflow = false;
+                    HAL_UART_DMAStop(mh->port);
+                }
 
-                    int attempts = 0;
-                    const int max_attempts = 3;
-                    while ((HAL_UARTEx_ReceiveToIdle_DMA(mh->port, mh->xBufferRX.uxBuffer, MAX_BUFFER) != HAL_OK) &&
-                           (++attempts < max_attempts))
-                    {
-                        HAL_UART_DMAStop(mh->port);
-                    }
+                if (attempts >= max_attempts)
+                {
+                    mh->u16errCnt++;
+                    break;
+                }
 
-                    if (attempts >= max_attempts)
-                    {
-                        mh->u16errCnt++;
-                        break;
-                    }
+                if (mh->port->hdmarx != NULL)
+                {
+                    __HAL_DMA_DISABLE_IT(mh->port->hdmarx, DMA_IT_HT);
+                }
 
-                    if (mh->port->hdmarx != NULL)
-                    {
-                        __HAL_DMA_DISABLE_IT(mh->port->hdmarx, DMA_IT_HT);
-                    }
-
-                    if (mh->myTaskModbusAHandle != NULL)
-                    {
-                        xTaskNotifyFromISR(mh->myTaskModbusAHandle,
-                                           (uint32_t)Size,
-                                           eSetValueWithOverwrite,
-                                           &xHigherPriorityTaskWoken);
-                    }
+                if (mh->myTaskModbusAHandle != NULL)
+                {
+                    xTaskNotifyFromISR(mh->myTaskModbusAHandle,
+                                       (uint32_t)Size,
+                                       eSetValueWithOverwrite,
+                                       &xHigherPriorityTaskWoken);
                 }
             }
-#endif
             break;
         }
     }
