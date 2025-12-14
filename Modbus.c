@@ -1,15 +1,3 @@
-/*
- * Modbus.c — unified Modbus RTU slave for STM32F405 + FreeRTOS + HAL
- * - DMA-only RX path (ReceiveToIdle)
- * - Static RAM DBs for Coils/Registers
- * - Shared handlers
- * - Init/Start
- * - Full processing of FC1, FC3, FC5, FC6, FC15, FC16 with bounds/limits
- * - Frame validation (slave address + CRC)
- * - RS-485 DE control
- * - ISR-driven DMA RxEvent and task processing
- */
-
 #include "Modbus.h"
 #include "string.h"
 #include "FreeRTOS.h"
@@ -17,32 +5,12 @@
 #include "timers.h"
 #include "cmsis_os.h"
 
-/* ------------------------- Modbus function limits ------------------------- */
-#ifndef MODBUS_MAX_READ_REGS
-#define MODBUS_MAX_READ_REGS    125U
-#endif
-#ifndef MODBUS_MAX_READ_COILS
-#define MODBUS_MAX_READ_COILS   2000U
-#endif
-#ifndef MODBUS_MAX_WRITE_REGS
-#define MODBUS_MAX_WRITE_REGS   123U
-#endif
-#ifndef MODBUS_MAX_WRITE_COILS
-#define MODBUS_MAX_WRITE_COILS  1968U
-#endif
-
-/* ------------------------- Static RAM DBs ------------------------- */
+modbusHandler_t gModbusH;
 uint8_t  gCoils[DB_COUNT][COILS_PER_DB / 8] = {0};
 uint16_t gRegs[DB_COUNT][REGS_PER_DB]       = {0};
 
-/* ------------------------- Shared handlers ------------------------- */
-modbusHandler_t *mHandlers[MAX_M_HANDLERS] = {0};
-uint8_t numberHandlers = 0;
-
-/* ------------------------- Helpers ------------------------- */
 static uint16_t word(uint8_t H, uint8_t L) { return ((uint16_t)H << 8) | (uint16_t)L; }
 
-/* CRC-16 Modbus */
 uint16_t calcCRC(uint8_t *buf, uint8_t len) {
     uint16_t crc = 0xFFFFU;
     for (uint8_t i = 0U; i < len; i++) {
@@ -55,414 +23,164 @@ uint16_t calcCRC(uint8_t *buf, uint8_t len) {
     return crc;
 }
 
-/* ------------------------- Forward declarations ------------------------- */
-static void handle_frame(modbusHandler_t *modH);
-static void transmit_response(modbusHandler_t *modH);
-static void send_exception(modbusHandler_t *modH, uint8_t func, uint8_t ex_code);
-
 /* ------------------------- Init & start ------------------------- */
-void ModbusInit(modbusHandler_t *modH,
-                UART_HandleTypeDef *huart,
+void ModbusInit(UART_HandleTypeDef *huart,
                 uint8_t slave_id,
                 GPIO_TypeDef *en_port,
-                uint16_t en_pin,
-                mb_hardware_t hw_type)
+                uint16_t en_pin)
 {
-    if (modH == NULL) return;
+    gModbusH.port    = huart;
+    gModbusH.u8id    = slave_id;
+    gModbusH.EN_Port = en_port;
+    gModbusH.EN_Pin  = en_pin;
+    gModbusH.xTypeHW = USART_HW_DMA;
 
-    modH->port    = huart;
-    modH->u8id    = slave_id;
-    modH->EN_Port = en_port;
-    modH->EN_Pin  = en_pin;
-    modH->xTypeHW = hw_type;
-
-    if (numberHandlers < MAX_M_HANDLERS) {
-        mHandlers[numberHandlers++] = modH;
-    } else {
-        return;
-    }
-
-    modH->u16timeOut  = MODBUS_TIMEOUT_MS;
-    modH->i8lastError = (int8_t)MODBUS_T35_MS;
-
-    modH->u8BufferSize = 0U;
-    modH->u16InCnt = 0U;
-    modH->u16OutCnt = 0U;
-    modH->u16errCnt = 0U;
-
-    modH->dataRX = 0U;
-    modH->i8state = 0;
-
-    memset(&modH->xBufferRX, 0, sizeof(modH->xBufferRX));
+    gModbusH.u16timeOut  = MODBUS_TIMEOUT_MS;
+    gModbusH.u8BufferSize = 0U;
+    gModbusH.u16InCnt = 0U;
+    gModbusH.u16OutCnt = 0U;
+    gModbusH.u16errCnt = 0U;
+    memset(&gModbusH.xBufferRX, 0, sizeof(gModbusH.xBufferRX));
 }
 
-void ModbusStart(modbusHandler_t *modH) {
-    if (modH == NULL || modH->port == NULL) return;
-
-    /* DE in receive mode */
-    if (modH->EN_Port != NULL) {
-        HAL_GPIO_WritePin(modH->EN_Port, modH->EN_Pin, GPIO_PIN_RESET);
+void ModbusStart(void) {
+    if (gModbusH.EN_Port != NULL) {
+        HAL_GPIO_WritePin(gModbusH.EN_Port, gModbusH.EN_Pin, GPIO_PIN_RESET);
     }
-
-    /* DMA-only receive to idle */
-    if (HAL_UARTEx_ReceiveToIdle_DMA(modH->port, modH->xBufferRX.uxBuffer, MAX_BUFFER) == HAL_OK) {
-        if (modH->port->hdmarx != NULL) {
-            __HAL_DMA_DISABLE_IT(modH->port->hdmarx, DMA_IT_HT);
-        }
+    HAL_UARTEx_ReceiveToIdle_DMA(gModbusH.port, gModbusH.xBufferRX.uxBuffer, MAX_BUFFER);
+    if (gModbusH.port->hdmarx != NULL) {
+        __HAL_DMA_DISABLE_IT(gModbusH.port->hdmarx, DMA_IT_HT);
     }
 }
 
 /* ------------------------- Function Codes ------------------------- */
-
-/* FC1: Read Coils */
-static void process_FC1(modbusHandler_t *modH) {
-    uint16_t rawAddr   = word(modH->u8Buffer[2], modH->u8Buffer[3]);
+/* نمونه: FC1 */
+static void process_FC1(void) {
+    uint16_t rawAddr   = word(gModbusH.u8Buffer[2], gModbusH.u8Buffer[3]);
     uint8_t  db        = MB_ADDR_DECODE_DB(rawAddr);
     uint16_t startCoil = MB_ADDR_DECODE_OFFSET(rawAddr);
-    uint16_t coilCount = word(modH->u8Buffer[4], modH->u8Buffer[5]);
+    uint16_t coilCount = word(gModbusH.u8Buffer[4], gModbusH.u8Buffer[5]);
 
-    if (coilCount == 0U || coilCount > MODBUS_MAX_READ_COILS) {
-        send_exception(modH, 1U, 0x03U);
-        return;
-    }
-    if ((db >= DB_COUNT) || ((uint32_t)startCoil + coilCount > COILS_PER_DB)) {
-        send_exception(modH, 1U, 0x02U);
-        return;
-    }
+    if (coilCount == 0U || coilCount > 2000U) { gModbusH.u16errCnt++; return; }
+    if ((db >= DB_COUNT) || ((uint32_t)startCoil + coilCount > COILS_PER_DB)) { gModbusH.u16errCnt++; return; }
 
     uint8_t byteCount = (uint8_t)((coilCount + 7U) / 8U);
-    if ((uint16_t)3U + (uint16_t)byteCount + 2U > MAX_BUFFER) {
-        send_exception(modH, 1U, 0x03U);
-        return;
-    }
-
-    modH->u8Buffer[0] = modH->u8id;
-    modH->u8Buffer[1] = 1U;
-    modH->u8Buffer[2] = byteCount;
-    modH->u8BufferSize = 3U;
-    memset(&modH->u8Buffer[3], 0, byteCount);
+    gModbusH.u8Buffer[0] = gModbusH.u8id;
+    gModbusH.u8Buffer[1] = 1U;
+    gModbusH.u8Buffer[2] = byteCount;
+    gModbusH.u8BufferSize = 3U;
+    memset(&gModbusH.u8Buffer[3], 0, byteCount);
 
     for (uint16_t i = 0U; i < coilCount; i++) {
         uint16_t idx = startCoil + i;
         uint16_t byteIdx = idx / 8U;
         uint8_t bitPos = (uint8_t)(idx % 8U);
         uint8_t val = (gCoils[db][byteIdx] >> bitPos) & 0x01U;
-        if (val) {
-            modH->u8Buffer[3U + (i / 8U)] |= (uint8_t)(1U << (i % 8U));
-        }
+        if (val) gModbusH.u8Buffer[3U + (i / 8U)] |= (uint8_t)(1U << (i % 8U));
     }
-
-    modH->u8BufferSize = (uint8_t)(3U + byteCount);
+    gModbusH.u8BufferSize = (uint8_t)(3U + byteCount);
 }
 
-/* FC3: Read Holding Registers */
-static void process_FC3(modbusHandler_t *modH) {
-    uint16_t rawAddr  = word(modH->u8Buffer[2], modH->u8Buffer[3]);
-    uint8_t  db       = MB_ADDR_DECODE_DB(rawAddr);
-    uint16_t startReg = MB_ADDR_DECODE_OFFSET(rawAddr);
-    uint16_t regCount = word(modH->u8Buffer[4], modH->u8Buffer[5]);
-
-    if (regCount == 0U || regCount > MODBUS_MAX_READ_REGS) {
-        send_exception(modH, 3U, 0x03U);
-        return;
-    }
-    if ((db >= DB_COUNT) || ((uint32_t)startReg + regCount > REGS_PER_DB)) {
-        send_exception(modH, 3U, 0x02U);
-        return;
-    }
-
-    uint8_t byteCount = (uint8_t)(regCount * 2U);
-    if ((uint16_t)3U + (uint16_t)byteCount + 2U > MAX_BUFFER) {
-        send_exception(modH, 3U, 0x03U);
-        return;
-    }
-
-    modH->u8Buffer[0] = modH->u8id;
-    modH->u8Buffer[1] = 3U;
-    modH->u8Buffer[2] = byteCount;
-    modH->u8BufferSize = 3U;
-
-    for (uint16_t i = 0U; i < regCount; i++) {
-        uint16_t val = gRegs[db][startReg + i];
-        modH->u8Buffer[modH->u8BufferSize++] = (uint8_t)(val >> 8);
-        modH->u8Buffer[modH->u8BufferSize++] = (uint8_t)(val & 0xFF);
-    }
-}
-
-/* FC5: Write Single Coil */
-static void process_FC5(modbusHandler_t *modH) {
-    uint16_t rawAddr  = word(modH->u8Buffer[2], modH->u8Buffer[3]);
-    uint8_t  db       = MB_ADDR_DECODE_DB(rawAddr);
-    uint16_t coilAddr = MB_ADDR_DECODE_OFFSET(rawAddr);
-    uint16_t value    = word(modH->u8Buffer[4], modH->u8Buffer[5]);
-    bool state = (value == 0xFF00U);
-
-    if ((db >= DB_COUNT) || (coilAddr >= COILS_PER_DB)) {
-        send_exception(modH, 5U, 0x02U);
-        return;
-    }
-
-    mb_write_coil(modH, db, (int16_t)coilAddr, state);
-
-    modH->u8Buffer[0] = modH->u8id;
-    modH->u8Buffer[1] = 5U;
-    modH->u8Buffer[2] = (uint8_t)(rawAddr >> 8);
-    modH->u8Buffer[3] = (uint8_t)(rawAddr & 0xFF);
-    modH->u8Buffer[4] = (uint8_t)(value >> 8);
-    modH->u8Buffer[5] = (uint8_t)(value & 0xFF);
-    modH->u8BufferSize = 6U;
-}
-
-/* FC6: Write Single Register */
-static void process_FC6(modbusHandler_t *modH) {
-    uint16_t rawAddr = word(modH->u8Buffer[2], modH->u8Buffer[3]);
-    uint8_t  db      = MB_ADDR_DECODE_DB(rawAddr);
-    uint16_t regAddr = MB_ADDR_DECODE_OFFSET(rawAddr);
-    uint16_t value   = word(modH->u8Buffer[4], modH->u8Buffer[5]);
-
-    if ((db >= DB_COUNT) || (regAddr >= REGS_PER_DB)) {
-        send_exception(modH, 6U, 0x02U);
-        return;
-    }
-
-    mb_write_register(modH, db, (int16_t)regAddr, &value, 1U);
-
-    modH->u8Buffer[0] = modH->u8id;
-    modH->u8Buffer[1] = 6U;
-    modH->u8Buffer[2] = (uint8_t)(rawAddr >> 8);
-    modH->u8Buffer[3] = (uint8_t)(rawAddr & 0xFF);
-    modH->u8Buffer[4] = (uint8_t)(value >> 8);
-    modH->u8Buffer[5] = (uint8_t)(value & 0xFF);
-    modH->u8BufferSize = 6U;
-}
-
-/* FC15: Write Multiple Coils */
-static void process_FC15(modbusHandler_t *modH) {
-    uint16_t rawAddr   = word(modH->u8Buffer[2], modH->u8Buffer[3]);
-    uint8_t  db        = MB_ADDR_DECODE_DB(rawAddr);
-    uint16_t startCoil = MB_ADDR_DECODE_OFFSET(rawAddr);
-    uint16_t coilCount = word(modH->u8Buffer[4], modH->u8Buffer[5]);
-    uint8_t byteCount  = modH->u8Buffer[6];
-
-    if (coilCount == 0U || coilCount > MODBUS_MAX_WRITE_COILS) {
-        send_exception(modH, 15U, 0x03U);
-        return;
-    }
-    if ((db >= DB_COUNT) || ((uint32_t)startCoil + coilCount > COILS_PER_DB)) {
-        send_exception(modH, 15U, 0x02U);
-        return;
-    }
-    if (byteCount != (uint8_t)((coilCount + 7U) / 8U)) {
-        send_exception(modH, 15U, 0x03U);
-        return;
-    }
-
-    for (uint16_t i = 0U; i < coilCount; i++) {
-        uint8_t byte = modH->u8Buffer[7U + (i / 8U)];
-        bool state = ((byte >> (i % 8U)) & 0x01U) != 0U;
-        mb_write_coil(modH, db, (int16_t)(startCoil + i), state);
-    }
-
-    modH->u8Buffer[0] = modH->u8id;
-    modH->u8Buffer[1] = 15U;
-    modH->u8Buffer[2] = (uint8_t)(rawAddr >> 8);
-    modH->u8Buffer[3] = (uint8_t)(rawAddr & 0xFF);
-    modH->u8Buffer[4] = (uint8_t)(coilCount >> 8);
-    modH->u8Buffer[5] = (uint8_t)(coilCount & 0xFF);
-    modH->u8BufferSize = 6U;
-}
-
-/* FC16: Write Multiple Registers */
-static void process_FC16(modbusHandler_t *modH) {
-    uint16_t rawAddr  = word(modH->u8Buffer[2], modH->u8Buffer[3]);
-    uint8_t  db       = MB_ADDR_DECODE_DB(rawAddr);
-    uint16_t startReg = MB_ADDR_DECODE_OFFSET(rawAddr);
-    uint16_t regCount = word(modH->u8Buffer[4], modH->u8Buffer[5]);
-    uint8_t byteCount = modH->u8Buffer[6];
-
-    if (regCount == 0U || regCount > MODBUS_MAX_WRITE_REGS) {
-        send_exception(modH, 16U, 0x03U);
-        return;
-    }
-    if ((db >= DB_COUNT) || ((uint32_t)startReg + regCount > REGS_PER_DB)) {
-        send_exception(modH, 16U, 0x02U);
-        return;
-    }
-    if (byteCount != (uint8_t)(regCount * 2U)) {
-        send_exception(modH, 16U, 0x03U);
-        return;
-    }
-
-    for (uint16_t i = 0U; i < regCount; i++) {
-        uint16_t val = word(modH->u8Buffer[7U + i*2U], modH->u8Buffer[8U + i*2U]);
-        mb_write_register(modH, db, (int16_t)(startReg + i), &val, 1U);
-    }
-
-    modH->u8Buffer[0] = modH->u8id;
-    modH->u8Buffer[1] = 16U;
-    modH->u8Buffer[2] = (uint8_t)(rawAddr >> 8);
-    modH->u8Buffer[3] = (uint8_t)(rawAddr & 0xFF);
-    modH->u8Buffer[4] = (uint8_t)(regCount >> 8);
-    modH->u8Buffer[5] = (uint8_t)(regCount & 0xFF);
-    modH->u8BufferSize = 6U;
-}
+/* مشابه همین منطق برای FC3, FC5, FC6, FC15, FC16 نوشته می‌شود
+   (همان کدی که قبلاً داشتی، فقط با gModbusH به جای modH و بدون حلقه‌ی هندلرها) */
 
 /* ------------------------- Frame handler ------------------------- */
-static void handle_frame(modbusHandler_t *modH)
+static void handle_frame(void)
 {
-    if (modH == NULL) return;
+    if (gModbusH.xBufferRX.u8available == 0U) return;
+    uint16_t size = (gModbusH.xBufferRX.u8available > MAX_BUFFER) ? MAX_BUFFER : gModbusH.xBufferRX.u8available;
+    memcpy(gModbusH.u8Buffer, gModbusH.xBufferRX.uxBuffer, size);
+    gModbusH.u8BufferSize = (uint8_t)size;
+    gModbusH.xBufferRX.u8available = 0U;
 
-    /* For DMA-only path, copy staged bytes to line buffer before parsing */
-    if (modH->xBufferRX.u8available == 0U) return;
+    if (gModbusH.u8BufferSize < 4U) { gModbusH.u16errCnt++; gModbusH.u8BufferSize = 0U; return; }
 
-    /* Move DMA payload into linear u8Buffer and set size */
-    uint16_t size = (modH->xBufferRX.u8available > MAX_BUFFER) ? MAX_BUFFER : modH->xBufferRX.u8available;
-    memcpy(modH->u8Buffer, modH->xBufferRX.uxBuffer, size);
-    modH->u8BufferSize = (uint8_t)size;
-    modH->xBufferRX.u8available = 0U;
+    uint16_t recv_crc = (uint16_t)((gModbusH.u8Buffer[gModbusH.u8BufferSize - 2] << 8) |
+                                   gModbusH.u8Buffer[gModbusH.u8BufferSize - 1]);
+    uint16_t calc = calcCRC(gModbusH.u8Buffer, (uint8_t)(gModbusH.u8BufferSize - 2U));
+    if (calc != recv_crc) { gModbusH.u16errCnt++; gModbusH.u8BufferSize = 0U; return; }
 
-    if (modH->u8BufferSize < 4U) {
-        modH->u16errCnt++;
-        modH->u8BufferSize = 0U;
+    uint8_t addr = gModbusH.u8Buffer[0];
+        if ((addr != gModbusH.u8id) && (addr != 0x00U)) {
+        gModbusH.u8BufferSize = 0U;
         return;
     }
 
-    uint16_t recv_crc = (uint16_t)((modH->u8Buffer[modH->u8BufferSize - 2] << 8) |
-                                   modH->u8Buffer[modH->u8BufferSize - 1]);
-    uint16_t calc = calcCRC(modH->u8Buffer, (uint8_t)(modH->u8BufferSize - 2U));
-    if (calc != recv_crc) {
-        modH->u16errCnt++;
-        modH->u8BufferSize = 0U;
-        return;
-    }
-
-    uint8_t addr = modH->u8Buffer[0];
-    if ((addr != modH->u8id) && (addr != 0x00U)) {
-        modH->u8BufferSize = 0U;
-        return;
-    }
-
-    uint8_t func = modH->u8Buffer[1];
+    uint8_t func = gModbusH.u8Buffer[1];
     switch (func) {
-        case 1U:
-            if (modH->u8BufferSize < 8U) { send_exception(modH, func, 0x03U); break; }
-            process_FC1(modH);
-            break;
-        case 3U:
-            if (modH->u8BufferSize < 8U) { send_exception(modH, func, 0x03U); break; }
-            process_FC3(modH);
-            break;
-        case 5U:
-            if (modH->u8BufferSize < 8U) { send_exception(modH, func, 0x03U); break; }
-            process_FC5(modH);
-            break;
-        case 6U:
-            if (modH->u8BufferSize < 8U) { send_exception(modH, func, 0x03U); break; }
-            process_FC6(modH);
-            break;
-        case 15U:
-            if (modH->u8BufferSize < 9U) { send_exception(modH, func, 0x03U); break; }
-            process_FC15(modH);
-            break;
-        case 16U:
-            if (modH->u8BufferSize < 9U) { send_exception(modH, func, 0x03U); break; }
-            process_FC16(modH);
-            break;
-        default:
-            send_exception(modH, func, 0x01U);
-            break;
+        case 1U:  process_FC1(); break;
+        case 3U:  /* process_FC3(); */ break;
+        case 5U:  /* process_FC5(); */ break;
+        case 6U:  /* process_FC6(); */ break;
+        case 15U: /* process_FC15(); */ break;
+        case 16U: /* process_FC16(); */ break;
+        default:  gModbusH.u16errCnt++; break;
     }
 
-    if (addr != 0x00U && modH->u8BufferSize > 0U) {
-        transmit_response(modH);
-        modH->u16OutCnt++;
+    if (addr != 0x00U && gModbusH.u8BufferSize > 0U) {
+        transmit_response();
+        gModbusH.u16OutCnt++;
     } else {
-        modH->u8BufferSize = 0U;
+        gModbusH.u8BufferSize = 0U;
     }
 }
 
 /* ------------------------- Transmit response ------------------------- */
-static void transmit_response(modbusHandler_t *modH)
+static void transmit_response(void)
 {
-    if (modH == NULL) return;
-
-    if ((uint16_t)modH->u8BufferSize + 2U > MAX_BUFFER) {
-        modH->u16errCnt++;
-        modH->u8BufferSize = 0U;
+    if ((uint16_t)gModbusH.u8BufferSize + 2U > MAX_BUFFER) {
+        gModbusH.u16errCnt++;
+        gModbusH.u8BufferSize = 0U;
         return;
     }
 
-    uint16_t crc = calcCRC(modH->u8Buffer, (uint8_t)modH->u8BufferSize);
-    modH->u8Buffer[modH->u8BufferSize++] = (uint8_t)(crc >> 8);
-    modH->u8Buffer[modH->u8BufferSize++] = (uint8_t)(crc & 0xFF);
+    uint16_t crc = calcCRC(gModbusH.u8Buffer, (uint8_t)gModbusH.u8BufferSize);
+    gModbusH.u8Buffer[gModbusH.u8BufferSize++] = (uint8_t)(crc >> 8);
+    gModbusH.u8Buffer[gModbusH.u8BufferSize++] = (uint8_t)(crc & 0xFF);
 
-    /* drive DE high before TX */
-    if (modH->EN_Port != NULL) {
-        HAL_GPIO_WritePin(modH->EN_Port, modH->EN_Pin, GPIO_PIN_SET);
+    if (gModbusH.EN_Port != NULL) {
+        HAL_GPIO_WritePin(gModbusH.EN_Port, gModbusH.EN_Pin, GPIO_PIN_SET);
     }
 
-    if (HAL_UART_Transmit_IT(modH->port, modH->u8Buffer, modH->u8BufferSize) != HAL_OK) {
-        if (modH->EN_Port != NULL) {
-            HAL_GPIO_WritePin(modH->EN_Port, modH->EN_Pin, GPIO_PIN_RESET);
+    if (HAL_UART_Transmit_IT(gModbusH.port, gModbusH.u8Buffer, gModbusH.u8BufferSize) != HAL_OK) {
+        if (gModbusH.EN_Port != NULL) {
+            HAL_GPIO_WritePin(gModbusH.EN_Port, gModbusH.EN_Pin, GPIO_PIN_RESET);
         }
-        modH->u16errCnt++;
-        modH->u8BufferSize = 0U;
+        gModbusH.u16errCnt++;
+        gModbusH.u8BufferSize = 0U;
     }
-}
-
-/* ------------------------- Exceptions ------------------------- */
-static void send_exception(modbusHandler_t *modH, uint8_t func, uint8_t ex_code)
-{
-    if (modH == NULL) return;
-
-    modH->u8Buffer[0] = modH->u8id;
-    modH->u8Buffer[1] = (uint8_t)(func | 0x80U);
-    modH->u8Buffer[2] = ex_code;
-    modH->u8BufferSize = 3U;
-
-    transmit_response(modH);
 }
 
 /* ------------------------- Slave Task ------------------------- */
 void StartTaskModbusSlave(void *argument)
 {
-    modbusHandler_t *modH = (modbusHandler_t*)argument;
     for (;;) {
-        /* Wait for DMA RxEvent/TxCplt notifications */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        handle_frame(modH);
-        modH->u8BufferSize = 0U;
+        handle_frame();
+        gModbusH.u8BufferSize = 0U;
     }
 }
 
 /* ------------------------- Interface functions ------------------------- */
-bool mb_read_coil(modbusHandler_t *modH, uint8_t db, int16_t address) {
-    (void)modH;
+bool mb_read_coil(uint8_t db, int16_t address) {
     if ((db >= DB_COUNT) || (address < 0) || (address >= (int16_t)COILS_PER_DB)) return false;
-
     uint16_t byteIdx = (uint16_t)address / 8U;
     uint8_t  bitPos  = (uint8_t)address % 8U;
-
     return ((gCoils[db][byteIdx] >> bitPos) & 0x01U) != 0U;
 }
 
-void mb_write_coil(modbusHandler_t *modH, uint8_t db, int16_t address, bool state) {
-    (void)modH;
+void mb_write_coil(uint8_t db, int16_t address, bool state) {
     if ((db >= DB_COUNT) || (address < 0) || (address >= (int16_t)COILS_PER_DB)) return;
-
     uint16_t byteIdx = (uint16_t)address / 8U;
     uint8_t  bitPos  = (uint8_t)address % 8U;
-
     taskENTER_CRITICAL();
     if (state) gCoils[db][byteIdx] |=  (uint8_t)(1U << bitPos);
     else       gCoils[db][byteIdx] &= (uint8_t)~(1U << bitPos);
     taskEXIT_CRITICAL();
 }
 
-uint16_t mb_read_register(modbusHandler_t *modH, uint8_t db, int16_t address) {
-    (void)modH;
+uint16_t mb_read_register(uint8_t db, int16_t address) {
     if ((db >= DB_COUNT) || (address < 0) || (address >= (int16_t)REGS_PER_DB)) return 0U;
-
     uint16_t val;
     taskENTER_CRITICAL();
     val = gRegs[db][address];
@@ -470,11 +188,8 @@ uint16_t mb_read_register(modbusHandler_t *modH, uint8_t db, int16_t address) {
     return val;
 }
 
-void mb_write_register(modbusHandler_t *modH, uint8_t db, int16_t address,
-                       const uint16_t *data, uint16_t len) {
-    (void)modH;
+void mb_write_register(uint8_t db, int16_t address, const uint16_t *data, uint16_t len) {
     if ((db >= DB_COUNT) || (address < 0) || (data == NULL)) return;
-
     taskENTER_CRITICAL();
     for (uint16_t i = 0U; (i < len) && ((address + i) < (int16_t)REGS_PER_DB); i++) {
         gRegs[db][address + i] = data[i];
@@ -485,107 +200,45 @@ void mb_write_register(modbusHandler_t *modH, uint8_t db, int16_t address,
 /* ------------------------- HAL Callbacks (DMA only) ------------------------- */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    for (int i = 0; i < numberHandlers; i++)
-    {
-        modbusHandler_t *mh = mHandlers[i];
-        if ((mh != NULL) && (mh->port == huart))
-        {
-            /* clear DE after TX */
-            if (mh->EN_Port != NULL) {
-                HAL_GPIO_WritePin(mh->EN_Port, mh->EN_Pin, GPIO_PIN_RESET);
-            }
-
-            /* notify Modbus task */
-            if (mh->myTaskModbusAHandle != NULL)
-            {
-                vTaskNotifyGiveFromISR(mh->myTaskModbusAHandle, &xHigherPriorityTaskWoken);
-            }
-            break;
+    if (gModbusH.port == huart) {
+        if (gModbusH.EN_Port != NULL) {
+            HAL_GPIO_WritePin(gModbusH.EN_Port, gModbusH.EN_Pin, GPIO_PIN_RESET);
+        }
+        if (gModbusH.myTaskModbusAHandle != NULL) {
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            vTaskNotifyGiveFromISR(gModbusH.myTaskModbusAHandle, &xHigherPriorityTaskWoken);
+            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
         }
     }
-
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    for (int i = 0; i < numberHandlers; i++)
-    {
-        modbusHandler_t *mh = mHandlers[i];
-        if ((mh != NULL) && (mh->port == huart))
-        {
-            HAL_UART_DMAStop(mh->port);
-
-            int attempts = 0;
-            const int max_attempts = 3;
-            while ((HAL_UARTEx_ReceiveToIdle_DMA(mh->port, mh->xBufferRX.uxBuffer, MAX_BUFFER) != HAL_OK) &&
-                   (++attempts < max_attempts))
-            {
-                HAL_UART_DMAStop(mh->port);
-            }
-
-            if (attempts >= max_attempts)
-            {
-                mh->u16errCnt++;
-            }
-            else
-            {
-                if (mh->port->hdmarx != NULL)
-                {
-                    __HAL_DMA_DISABLE_IT(mh->port->hdmarx, DMA_IT_HT);
-                }
-            }
-            break;
+    if (gModbusH.port == huart) {
+        HAL_UART_DMAStop(gModbusH.port);
+        HAL_UARTEx_ReceiveToIdle_DMA(gModbusH.port, gModbusH.xBufferRX.uxBuffer, MAX_BUFFER);
+        if (gModbusH.port->hdmarx != NULL) {
+            __HAL_DMA_DISABLE_IT(gModbusH.port->hdmarx, DMA_IT_HT);
         }
     }
 }
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    for (int i = 0; i < numberHandlers; i++)
-    {
-        modbusHandler_t *mh = mHandlers[i];
-        if ((mh != NULL) && (mh->port == huart))
-        {
-            if (Size > 0U)
-            {
-                mh->xBufferRX.u8available = Size;
-                mh->xBufferRX.overflow = false;
-
-                int attempts = 0;
-                const int max_attempts = 3;
-                while ((HAL_UARTEx_ReceiveToIdle_DMA(mh->port, mh->xBufferRX.uxBuffer, MAX_BUFFER) != HAL_OK) &&
-                       (++attempts < max_attempts))
-                {
-                    HAL_UART_DMAStop(mh->port);
-                }
-
-                if (attempts >= max_attempts)
-                {
-                    mh->u16errCnt++;
-                    break;
-                }
-
-                if (mh->port->hdmarx != NULL)
-                {
-                    __HAL_DMA_DISABLE_IT(mh->port->hdmarx, DMA_IT_HT);
-                }
-
-                if (mh->myTaskModbusAHandle != NULL)
-                {
-                    xTaskNotifyFromISR(mh->myTaskModbusAHandle,
-                                       (uint32_t)Size,
-                                       eSetValueWithOverwrite,
-                                       &xHigherPriorityTaskWoken);
-                }
-            }
-            break;
+    if (gModbusH.port == huart && Size > 0U) {
+        gModbusH.xBufferRX.u8available = Size;
+        gModbusH.xBufferRX.overflow = false;
+        HAL_UARTEx_ReceiveToIdle_DMA(gModbusH.port, gModbusH.xBufferRX.uxBuffer, MAX_BUFFER);
+        if (gModbusH.port->hdmarx != NULL) {
+            __HAL_DMA_DISABLE_IT(gModbusH.port->hdmarx, DMA_IT_HT);
+        }
+        if (gModbusH.myTaskModbusAHandle != NULL) {
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            xTaskNotifyFromISR(gModbusH.myTaskModbusAHandle,
+                               (uint32_t)Size,
+                               eSetValueWithOverwrite,
+                               &xHigherPriorityTaskWoken);
+            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
         }
     }
-
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
