@@ -9,6 +9,7 @@ modbusHandler_t gModbusH;
 uint8_t  gCoils[DB_COUNT][COILS_PER_DB / 8] = {0};
 uint16_t gRegs[DB_COUNT][REGS_PER_DB]       = {0};
 
+static void transmit_response(void);
 static uint16_t word(uint8_t H, uint8_t L) { return ((uint16_t)H << 8) | (uint16_t)L; }
 
 uint16_t calcCRC(uint8_t *buf, uint8_t len) {
@@ -125,24 +126,32 @@ static void handle_frame(void)
     }
 }
 
-/* ------------------------- Transmit response ------------------------- */
+/* ------------------------- Transmit response (DMA TX) ------------------------- */
 static void transmit_response(void)
 {
+    /* طول پاسخ + CRC */
     if ((uint16_t)gModbusH.u8BufferSize + 2U > MAX_BUFFER) {
         gModbusH.u16errCnt++;
         gModbusH.u8BufferSize = 0U;
         return;
     }
 
+    /* افزودن CRC */
     uint16_t crc = calcCRC(gModbusH.u8Buffer, (uint8_t)gModbusH.u8BufferSize);
     gModbusH.u8Buffer[gModbusH.u8BufferSize++] = (uint8_t)(crc >> 8);
     gModbusH.u8Buffer[gModbusH.u8BufferSize++] = (uint8_t)(crc & 0xFF);
 
+    /* فعال‌سازی DE قبل از ارسال */
     if (gModbusH.EN_Port != NULL) {
         HAL_GPIO_WritePin(gModbusH.EN_Port, gModbusH.EN_Pin, GPIO_PIN_SET);
     }
 
-    if (HAL_UART_Transmit_IT(gModbusH.port, gModbusH.u8Buffer, gModbusH.u8BufferSize) != HAL_OK) {
+    /* ارسال با DMA برای یکدست بودن با RX */
+    HAL_StatusTypeDef ret = HAL_UART_Transmit_DMA(gModbusH.port,
+                                                  gModbusH.u8Buffer,
+                                                  gModbusH.u8BufferSize);
+    if (ret != HAL_OK) {
+        /* شکست ارسال: DE را Reset و شمارندهٔ خطا */
         if (gModbusH.EN_Port != NULL) {
             HAL_GPIO_WritePin(gModbusH.EN_Port, gModbusH.EN_Pin, GPIO_PIN_RESET);
         }
@@ -198,12 +207,16 @@ void mb_write_register(uint8_t db, int16_t address, const uint16_t *data, uint16
 }
 
 /* ------------------------- HAL Callbacks (DMA only) ------------------------- */
+/* ------------------------- Tx complete callback (shared for IT/DMA) ------------------------- */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (gModbusH.port == huart) {
+        /* پاک‌سازی DE پس از ارسال کامل */
         if (gModbusH.EN_Port != NULL) {
             HAL_GPIO_WritePin(gModbusH.EN_Port, gModbusH.EN_Pin, GPIO_PIN_RESET);
         }
+
+        /* نوتیفای تسک برای ادامهٔ جریان */
         if (gModbusH.myTaskModbusAHandle != NULL) {
             BaseType_t xHigherPriorityTaskWoken = pdFALSE;
             vTaskNotifyGiveFromISR(gModbusH.myTaskModbusAHandle, &xHigherPriorityTaskWoken);
